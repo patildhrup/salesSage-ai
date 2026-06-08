@@ -4,7 +4,7 @@ import os
 from typing import List, Optional, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from app.v1.models import Contact
 
 # Load environment variables
 load_dotenv()
@@ -12,14 +12,6 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-class DecisionMaker(BaseModel):
-    name: str = Field(..., alias="full_name")
-    title: str = Field(..., alias="current_job_title")
-    linkedin_url: Optional[str] = None
-
-    class Config:
-        populate_by_name = True
 
 class ProspeoServiceError(Exception):
     """Base exception for ProspeoService"""
@@ -66,7 +58,7 @@ class ProspeoService:
         self, 
         domain: str, 
         page: int = 1
-    ) -> List[DecisionMaker]:
+    ) -> List[Contact]:
         """
         Find decision makers for a given company domain.
         
@@ -75,16 +67,13 @@ class ProspeoService:
             page: The page number for pagination.
             
         Returns:
-            List[DecisionMaker]: A list of filtered decision makers.
+            List[Contact]: A list of filtered decision makers.
         """
         if not self.api_key:
             raise ProspeoServiceError("Prospeo API Key is required")
 
         endpoint = f"{self.BASE_URL}/search-person"
         
-        # We can use person_job_title with OR logic for better filtering at the API level
-        # However, to be safe and match the exact requirements, we'll fetch and filter in Python
-        # but we'll use seniority filter to reduce results to relevant levels.
         payload = {
             "filters": {
                 "person_search": domain,
@@ -119,10 +108,17 @@ class ProspeoService:
                     
                     if is_match:
                         try:
-                            dm = DecisionMaker(**person_data)
+                            # Map Prospeo data to our standardized Contact model
+                            dm = Contact(
+                                company_domain=domain,
+                                name=person_data.get("full_name"),
+                                title=person_data.get("current_job_title"),
+                                linkedin_url=person_data.get("linkedin_url"),
+                                verified=False # search-person doesn't provide verified email by default
+                            )
                             decision_makers.append(dm)
                         except Exception as e:
-                            logger.error(f"Error parsing person data: {e}")
+                            logger.error(f"Error parsing person data into Contact model: {e}")
                 
                 logger.info(f"Found {len(decision_makers)} matching decision makers on page {page}.")
                 return decision_makers
@@ -143,7 +139,7 @@ class ProspeoService:
         self,
         domain: str,
         max_pages: int = 5
-    ) -> List[DecisionMaker]:
+    ) -> List[Contact]:
         """
         Fetch and filter decision makers across multiple pages.
         """
@@ -152,16 +148,10 @@ class ProspeoService:
             try:
                 dms = await self.find_decision_makers(domain, page=page)
                 if not dms:
-                    # If we got results but none matched our filters, we might still want to check next page
-                    # However, if Prospeo returns empty results, we stop.
-                    # We'll check if the 'results' in the response was empty.
-                    # This logic is slightly simplified; in a production app you'd check pagination total_pages.
                     pass 
                 
                 all_dms.extend(dms)
                 
-                # In a real scenario, you'd check the pagination metadata to stop
-                # For this implementation, we'll keep it simple or implement a check.
             except Exception as e:
                 logger.error(f"Stopping pagination due to error: {e}")
                 break

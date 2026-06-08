@@ -2,11 +2,15 @@ import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
-from app.v1.services.ocean_service import OceanService, OceanServiceError, OceanServiceAPIError
-from app.v1.services.prospeo_service import ProspeoService, ProspeoServiceError, ProspeoServiceAPIError, DecisionMaker
-from app.v1.services.eazyreach_service import EazyReachService, EazyReachServiceError, EazyReachServiceAPIError
 from pydantic import BaseModel
 import logging
+
+from app.v1.models import Contact, Company
+from app.v1.services.ocean_service import OceanService, OceanServiceError, OceanServiceAPIError
+from app.v1.services.prospeo_service import ProspeoService, ProspeoServiceError, ProspeoServiceAPIError
+from app.v1.services.eazyreach_service import EazyReachService, EazyReachServiceError, EazyReachServiceAPIError
+from app.v1.services.email_generator import EmailGenerator, EmailContent
+from app.v1.services.brevo_service import BrevoService, BrevoServiceError, BrevoServiceAPIError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -14,12 +18,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="SalesSage Backend API",
-    description="Backend service for SalesSage with Ocean.io, Prospeo, and Eazyreach integration",
+    description="Backend service for SalesSage with Ocean.io, Prospeo, Eazyreach, and Brevo integration",
     version="1.0.0"
 )
 
 # Configure CORS for frontend integration
-# In production, you should restrict this to your frontend domain
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins for development
@@ -44,7 +47,7 @@ class DecisionMakerRequest(BaseModel):
 
 class DecisionMakerResponse(BaseModel):
     domain: str
-    decision_makers: List[DecisionMaker]
+    decision_makers: List[Contact]
 
 class EmailEnrichmentRequest(BaseModel):
     linkedin_url: str
@@ -52,6 +55,18 @@ class EmailEnrichmentRequest(BaseModel):
 class EmailEnrichmentResponse(BaseModel):
     linkedin_url: str
     email: Optional[str]
+
+class EmailGenerationRequest(BaseModel):
+    company_name: str
+    contact_name: str
+    contact_title: str
+    template_type: Optional[str] = None
+
+class SendEmailRequest(BaseModel):
+    recipient_email: str
+    subject: str
+    html_content: str
+    recipient_name: Optional[str] = None
 
 @app.get("/")
 async def root():
@@ -63,7 +78,6 @@ async def get_similar_companies(request: SimilarityRequest):
     Find companies similar to the provided domain using Ocean.io.
     """
     ocean_service = OceanService()
-
     try:
         similar_domains = await ocean_service.find_similar_companies(
             domain=request.domain,
@@ -90,7 +104,6 @@ async def get_decision_makers(request: DecisionMakerRequest):
     Find decision makers for the provided domain using Prospeo.
     """
     prospeo_service = ProspeoService()
-
     try:
         decision_makers = await prospeo_service.get_all_decision_makers(
             domain=request.domain,
@@ -116,7 +129,6 @@ async def get_verified_email(request: EmailEnrichmentRequest):
     Get verified business email for a LinkedIn profile using Eazyreach.
     """
     eazyreach_service = EazyReachService()
-    
     try:
         email = await eazyreach_service.get_verified_email(request.linkedin_url)
         return EmailEnrichmentResponse(
@@ -133,9 +145,48 @@ async def get_verified_email(request: EmailEnrichmentRequest):
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail="An internal server error occurred")
 
+@app.post("/api/v1/generate-email", response_model=EmailContent)
+async def generate_email(request: EmailGenerationRequest):
+    """
+    Generate a personalized B2B outreach email content.
+    """
+    try:
+        content = EmailGenerator.generate(
+            company_name=request.company_name,
+            contact_name=request.contact_name,
+            contact_title=request.contact_title,
+            template_type=request.template_type
+        )
+        return content
+    except Exception as e:
+        logger.error(f"Email generation error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate email content")
+
+@app.post("/api/v1/send-email")
+async def send_email(request: SendEmailRequest):
+    """
+    Send a transactional email using Brevo.
+    """
+    brevo_service = BrevoService()
+    try:
+        result = await brevo_service.send_email(
+            recipient_email=request.recipient_email,
+            subject=request.subject,
+            html_content=request.html_content,
+            recipient_name=request.recipient_name
+        )
+        return {"status": "success", "message_id": result.get("messageId")}
+    except BrevoServiceAPIError as e:
+        logger.error(f"Brevo API error: {str(e)}")
+        raise HTTPException(status_code=e.status_code or 502, detail=str(e))
+    except BrevoServiceError as e:
+        logger.error(f"Brevo service error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An internal server error occurred")
 
 if __name__ == "__main__":
     import uvicorn
-    # Use environment variables for port/host if needed, else defaults
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

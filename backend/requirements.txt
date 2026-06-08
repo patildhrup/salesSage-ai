@@ -4,3 +4,5 @@ python-dotenv
 httpx
 tenacity
 loguru
+email-validator
+pydantic[email]
